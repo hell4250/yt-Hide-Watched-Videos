@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube - Hide Watched Videos
 // @namespace    https://tampermonkey.net/
-// @version      1.2.0
+// @version      1.3.0
 // @description  YouTube 피드에서 시청한 동영상 숨기기
 // @match        https://www.youtube.com/*
 // @run-at       document-start
@@ -12,24 +12,14 @@
     'use strict';
 
     // ============================================================
-    // 설정
+    // 설정 및 셀렉터
     // ============================================================
-    const WATCHED_THRESHOLD = 15;
+    const CONFIG = Object.freeze({
+        WATCHED_THRESHOLD: 15, // 시청 기준 (%)
+        ATTR_CHECKED: 'data-tm-watched-checked',
+        ATTR_HIDDEN: 'data-tm-watched-hidden',
+    });
 
-    // ============================================================
-    // CSS
-    // ============================================================
-    const style = document.createElement('style');
-    style.textContent = `
-        [data-tm-watched-hidden="true"] {
-            display: none !important;
-        }
-    `;
-    document.documentElement.appendChild(style);
-
-    // ============================================================
-    // 영상 컨테이너 셀렉터
-    // ============================================================
     const VIDEO_SELECTORS = [
         'ytd-rich-item-renderer',
         'ytd-video-renderer',
@@ -38,7 +28,6 @@
         'yt-lockup-view-model'
     ].join(',');
 
-    // progress bar 관련 셀렉터 (나중에 붙는 경우 감지용)
     const PROGRESS_SELECTORS = [
         '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment',
         '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegmentModern',
@@ -48,135 +37,173 @@
     ].join(',');
 
     // ============================================================
-    // 시청률 확인
+    // 스타일 주입
     // ============================================================
-    function getWatchProgress(container) {
-        const progressElements = container.querySelectorAll(
-            '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment, ' +
-            '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegmentModern, ' +
-            '#progress'
-        );
+    function injectStyle() {
+        const style = document.createElement('style');
+        style.textContent = `[${CONFIG.ATTR_HIDDEN}="true"] { display: none !important; }`;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    // ============================================================
+    // 시청률 계산 (레이아웃 리플로우 방지)
+    // ============================================================
+    function getWatchProgressInfo(container) {
+        const progressElements = container.querySelectorAll(PROGRESS_SELECTORS);
+        if (progressElements.length === 0) {
+            return { progress: 0, hasProgressBar: false };
+        }
 
         let maxProgress = 0;
 
-        for (const el of progressElements) {
-            // 1. inline style의 width: N% 우선
-            const styleAttr = el.getAttribute('style') || '';
-            const match = styleAttr.match(/width\s*:\s*([\d.]+)%/i);
-            if (match) {
-                const p = parseFloat(match[1]);
+        for (let i = 0; i < progressElements.length; i++) {
+            const el = progressElements[i];
+
+            // 1. style.width 또는 인라인 스타일 문자열 직접 파싱 (리플로우 발생 안 함)
+            const styleWidth = el.style.width;
+            if (styleWidth && styleWidth.endsWith('%')) {
+                const p = parseFloat(styleWidth);
                 if (!Number.isNaN(p)) {
                     maxProgress = Math.max(maxProgress, p);
                     continue;
                 }
             }
 
-            // 2. style 속성이 없으면 computed width로 계산
-            const computed = getComputedStyle(el);
-            const width = parseFloat(computed.width);
+            const styleAttr = el.getAttribute('style');
+            if (styleAttr) {
+                const match = styleAttr.match(/width\s*:\s*([\d.]+)%/i);
+                if (match) {
+                    const p = parseFloat(match[1]);
+                    if (!Number.isNaN(p)) {
+                        maxProgress = Math.max(maxProgress, p);
+                        continue;
+                    }
+                }
+            }
+
+            // 2. 인라인 스타일이 없는 경우 fallback 계산 (강제 레이아웃 계산 발생)
             const parent = el.parentElement;
-            if (parent && width > 0 && parent.clientWidth > 0) {
-                const p = (width / parent.clientWidth) * 100;
-                maxProgress = Math.max(maxProgress, p);
-            }
-        }
-
-        return maxProgress;
-    }
-
-    // ============================================================
-    // 영상 하나 검사 (이미 검사한 건 절대 다시 안 함)
-    // ============================================================
-    function processVideo(container) {
-        if (!container || container.dataset.tmWatchedChecked === 'true') {
-            return;
-        }
-
-        const progress = getWatchProgress(container);
-
-        // 검사 완료 표시 (progress가 있든 없든 한 번만 검사)
-        container.dataset.tmWatchedChecked = 'true';
-
-        if (progress >= WATCHED_THRESHOLD) {
-            container.dataset.tmWatchedHidden = 'true';
-        }
-    }
-
-    // ============================================================
-    // 노드 처리
-    // ============================================================
-    function processNode(node) {
-        if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-        // 1. 새로 추가된 노드 자체가 영상 컨테이너인 경우
-        if (node.matches?.(VIDEO_SELECTORS)) {
-            processVideo(node);
-        }
-
-        // 2. 새로 추가된 노드 안에 영상 컨테이너가 있는 경우
-        const containers = node.querySelectorAll?.(VIDEO_SELECTORS);
-        if (containers) {
-            containers.forEach(processVideo);
-        }
-
-        // 3. 중요: progress bar가 나중에 붙는 경우
-        //    → 가장 가까운 상위 영상 컨테이너를 찾아서 검사
-        if (node.matches?.(PROGRESS_SELECTORS) || node.querySelector?.(PROGRESS_SELECTORS)) {
-            const parentVideo = node.closest?.(VIDEO_SELECTORS);
-            if (parentVideo) {
-                processVideo(parentVideo);
-            }
-        }
-    }
-
-    // ============================================================
-    // MutationObserver (debounce)
-    // ============================================================
-    let scheduled = false;
-    const pendingNodes = new Set();
-
-    const observer = new MutationObserver(mutations => {
-        for (const mutation of mutations) {
-            if (mutation.type !== 'childList') continue;
-            for (const node of mutation.addedNodes) {
-                if (node.nodeType === Node.ELEMENT_NODE) {
-                    pendingNodes.add(node);
+            if (parent && parent.clientWidth > 0) {
+                const width = el.offsetWidth;
+                if (width > 0) {
+                    const p = (width / parent.clientWidth) * 100;
+                    maxProgress = Math.max(maxProgress, p);
                 }
             }
         }
 
-        if (!scheduled && pendingNodes.size > 0) {
-            scheduled = true;
-            requestAnimationFrame(() => {
-                pendingNodes.forEach(processNode);
-                pendingNodes.clear();
-                scheduled = false;
-            });
+        return { progress: maxProgress, hasProgressBar: true };
+    }
+
+    // ============================================================
+    // 영상 카드 검사 및 숨김 처리
+    // ============================================================
+    function processVideo(container) {
+        if (!container || container.getAttribute(CONFIG.ATTR_CHECKED) === 'true') {
+            return;
+        }
+
+        const { progress, hasProgressBar } = getWatchProgressInfo(container);
+
+        // 프로그래스 바 요소가 실제 존재할 때만 검사 완료 플래그 설정
+        // (지연 로딩으로 프로그래스 바가 늦게 생성되는 경우 대응)
+        if (hasProgressBar) {
+            container.setAttribute(CONFIG.ATTR_CHECKED, 'true');
+        }
+
+        if (progress >= CONFIG.WATCHED_THRESHOLD) {
+            container.setAttribute(CONFIG.ATTR_HIDDEN, 'true');
+            container.setAttribute(CONFIG.ATTR_CHECKED, 'true');
+        }
+    }
+
+    // ============================================================
+    // MutationObserver 배치 처리 및 노드 수집
+    // ============================================================
+    const pendingNodes = new Set();
+    let isScheduled = false;
+
+    function flushPendingNodes() {
+        const targetContainers = new Set();
+
+        for (const node of pendingNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+
+            // 1. 추가된 노드가 영상 카드인 경우
+            if (node.matches(VIDEO_SELECTORS)) {
+                targetContainers.add(node);
+            } else {
+                const children = node.querySelectorAll(VIDEO_SELECTORS);
+                for (let i = 0; i < children.length; i++) {
+                    targetContainers.add(children[i]);
+                }
+            }
+
+            // 2. 추가된 노드가 뒤늦게 주입된 프로그래스 바인 경우
+            if (node.matches(PROGRESS_SELECTORS)) {
+                const parent = node.closest(VIDEO_SELECTORS);
+                if (parent) targetContainers.add(parent);
+            } else {
+                const progressChildren = node.querySelectorAll(PROGRESS_SELECTORS);
+                for (let i = 0; i < progressChildren.length; i++) {
+                    const parent = progressChildren[i].closest(VIDEO_SELECTORS);
+                    if (parent) targetContainers.add(parent);
+                }
+            }
+        }
+
+        pendingNodes.clear();
+        isScheduled = false;
+
+        for (const container of targetContainers) {
+            processVideo(container);
+        }
+    }
+
+    const observer = new MutationObserver(mutations => {
+        let hasAddedNodes = false;
+
+        for (let i = 0; i < mutations.length; i++) {
+            const addedNodes = mutations[i].addedNodes;
+            for (let j = 0; j < addedNodes.length; j++) {
+                const node = addedNodes[j];
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    pendingNodes.add(node);
+                    hasAddedNodes = true;
+                }
+            }
+        }
+
+        if (hasAddedNodes && !isScheduled) {
+            isScheduled = true;
+            requestAnimationFrame(flushPendingNodes);
         }
     });
 
     // ============================================================
-    // 시작
+    // 초기화 및 실행
     // ============================================================
-    function start() {
-        if (!document.body) {
-            requestAnimationFrame(start);
-            return;
+    function init() {
+        injectStyle();
+
+        const startObserving = () => {
+            const existingVideos = document.querySelectorAll(VIDEO_SELECTORS);
+            for (let i = 0; i < existingVideos.length; i++) {
+                processVideo(existingVideos[i]);
+            }
+
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+            });
+        };
+
+        if (document.body) {
+            startObserving();
+        } else {
+            document.addEventListener('DOMContentLoaded', startObserving, { once: true });
         }
-
-        // 이미 존재하는 영상들 검사
-        document.querySelectorAll(VIDEO_SELECTORS).forEach(processVideo);
-
-        // 이후 추가되는 노드 감시
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', start, { once: true });
-    } else {
-        start();
-    }
+    init();
 })();

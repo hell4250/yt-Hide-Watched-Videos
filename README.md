@@ -16,7 +16,9 @@ YouTube 피드에서 이미 시청한 동영상을 자동으로 숨겨주는 Tam
 
 YouTube가 동적으로 콘텐츠를 추가해도 실시간으로 적용
 
-한 번 검사한 영상은 다시 검사하지 않음
+progress bar가 늦게 붙는 경우도 제대로 감지
+
+레이아웃 리플로우를 최소화한 진행률 계산
 
 
 
@@ -38,9 +40,15 @@ YouTube를 새로고침하면 바로 동작합니다.
 
 설정
 
-스크립트 상단의 값만 바꾸면 됩니다.
+스크립트 상단 CONFIG 객체의 값만 바꾸면 됩니다.
 
-JavaScriptconst WATCHED\_THRESHOLD = 15;  // 이 퍼센트 이상이면 숨김
+JavaScriptconst CONFIG = Object.freeze({
+
+&#x20;   WATCHED\_THRESHOLD: 15, // 시청 기준 (%)
+
+&#x20;   // ...
+
+});
 
 원하는 수치로 변경한 뒤 저장하세요.
 
@@ -52,13 +60,15 @@ JavaScriptconst WATCHED\_THRESHOLD = 15;  // 이 퍼센트 이상이면 숨김
 
 
 
-영상 썸네일에 있는 시청 진행 바(width: N%)를 읽어서 진행률을 계산합니다.
+영상 썸네일에 있는 시청 진행 바를 읽어 진행률을 계산합니다.
 
-진행률이 WATCHED\_THRESHOLD 이상이면 해당 영상 컨테이너에 display: none을 적용합니다.
+인라인 스타일(width: N%)을 우선 파싱해서 불필요한 레이아웃 계산을 피합니다.
 
-MutationObserver로 새로 추가되는 영상을 감지해 처리합니다.
+진행률이 WATCHED\_THRESHOLD 이상이면 해당 영상 컨테이너를 숨깁니다.
 
-progress bar가 나중에 붙는 경우도 상위 컨테이너를 찾아 다시 검사합니다.
+progress bar가 아직 없는 영상은 검사 완료로 표시하지 않고, 나중에 붙으면 다시 검사합니다.
+
+MutationObserver로 새로 추가되는 노드를 모아 한 번에 처리합니다.
 
 
 
@@ -75,8 +85,6 @@ https://www.youtube.com/\* 전체에서 동작합니다.
 
 
 YouTube UI가 크게 바뀌면 셀렉터가 동작하지 않을 수 있습니다. 그때는 스크립트 업데이트가 필요합니다.
-
-이미 로드된 영상 중 progress bar가 아직 렌더링되지 않은 경우는 숨기지 못할 수 있습니다.
 
 @grant none으로 작성되어 있어 외부 API나 저장소를 사용하지 않습니다.
 
